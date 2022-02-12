@@ -40,6 +40,14 @@
 // Maxmimum temperature difference to measure 
 // between diagnostic maximum and minimum, Celsius.
 #define TEMP_DIAGNOSTIC_MAX_DIFFERENCE (15)
+// Delay between diagnostic measurements, milliseconds.
+#define TEMP_DIAGNOSTIC_MEASUREMENT_INTERVAL (10)
+// Minimum sensible temperature that can be measured 
+// when performing temperature diagnostics, Celsius.
+#define TEMP_DIAGNOSTIC_TEMP_MIN (0)
+// Maximum sensible temperature that can be measured 
+// when performing temperature diagnostics, Celsius.
+#define TEMP_DIAGNOSTIC_TEMP_MAX (50)
 
 // Water Pump
 // Pin D3, H-Bridge ENABLE-A pin.
@@ -53,9 +61,9 @@
 
 // Power Management
 // Battery maximum voltage, Volts.
-#define BAT_VMAX (6.7)
+#define BATTERY_VOLTAGE_MAX (6.7)
 // Battery minimum voltage, Volts.
-#define BAT_VMIN (5.25)
+#define BATTERY_VOLTAGE_MIN (5.25)
 
 // I2C Interface
 // I2C LCD address.
@@ -98,6 +106,11 @@
 
 #define KELVIN_CELSIUS_OFFSET (273.15)
 
+// Minimum internal reference voltage, Volt, hundredths (e.g. 100 = 1.0V).
+#define INTERNAL_VCC_MIN (425)
+// Maximum internal reference voltage, Volt, hundredths.
+#define INTERNAL_VCC_MAX (550)
+
 // Core
 // Execution frequency of the loop() method.
 #define PROGRAM_FREQUENCY (10)
@@ -112,7 +125,29 @@ typedef enum
 {
     RETURN_CODE__UNINITIALIZED = -1,
     RETURN_CODE__SUCCESS = 0,
+    
+    // A null pointer has been detected.
     RETURN_CODE__NULL_POINTER,
+
+    // Expected value bounds of a sensor or device are exceeded
+    // by measured values.
+    RETURN_CODE__TEMP_TOO_HIGH,
+    RETURN_CODE__TEMP_TOO_LOW,
+
+    // Exceeded internal voltage.
+    RETURN_CODE__VCC_TOO_HIGH,
+    RETURN_CODE__VCC_TOO_LOW,
+
+    // Exceeded battery voltage.
+    RETURN_CODE__BATTERY_TOO_HIGH,
+    RETURN_CODE__BATTERY_TOO_LOW,
+
+    // Expected maximum difference between measured values
+    // of a sensor are exceeded.
+    RETURN_CODE__UNSTABLE_VALUE_TEMP,
+
+    // Unstable internal voltage.
+    RETURN_CODE__UNSTABLE_VALUE_VCC,
 
 } return_code_t;
 
@@ -255,17 +290,24 @@ void setup()
     lcd__init();    // TODO: check return code
 
     // Configure input/output pins.
-    pinMode(IN_BUTTON_PTT, INPUT);
-    pinMode(OUT_SPEAKER, OUTPUT);
-    pinMode(AIN_TEMP_1, INPUT);
-    pinMode(AIN_TEMP_2, INPUT);
-    pinMode(AIN_TEMP_3, INPUT);
-    pinMode(AIN_TEMP_4, INPUT);
-    pinMode(AIN_FLOW_RATE, INPUT);
-    pinMode(AIN_BATTERY_VCC, INPUT);
+    // Inputs - Analog
+    pinMode(AIN_TEMP_1,       INPUT);
+    pinMode(AIN_TEMP_2,       INPUT);
+    pinMode(AIN_TEMP_3,       INPUT);
+    pinMode(AIN_TEMP_4,       INPUT);
+    pinMode(AIN_FLOW_RATE,    INPUT);
+    pinMode(AIN_BATTERY_VCC,  INPUT);
+
+    // Inputs - Digital
+    pinMode(IN_BUTTON_PTT,    INPUT);
+
+    // Outputs - Analog
+    pinMode(OUT_SPEAKER,      OUTPUT);
+    pinMode(OUT_WATER_IN_1,   OUTPUT);
+    pinMode(OUT_WATER_IN_2,   OUTPUT);
+
+    // Outputs - Digital
     pinMode(OUT_WATER_ENABLE, OUTPUT);
-    pinMode(OUT_WATER_IN_1, OUTPUT);
-    pinMode(OUT_WATER_IN_2, OUTPUT);
 
     // to conclude:
     // performDiagnostics();
@@ -273,6 +315,7 @@ void setup()
 
 void loop()
 {
+    // TODO: save loop() iteration start time.
     // monitor:
 
     // ptt
@@ -293,7 +336,7 @@ void loop()
     //<< (String)temp2 << ", " << (String)temp3);
 
     // measure power
-    pwr__get_battery_level();
+    power__get_battery_level();
 
     // measure requested flowrate
     pumpFlowRate = analogRead(AIN_FLOW_RATE);
@@ -334,6 +377,8 @@ void loop()
     }
 
     delay(100); // 10 Hz refresh rate.
+    // TODO: wait the remaining time to achieve a `PROGRAM_RATE` frequency.
+    // Log an error if it cannot be achieved.
 }
 
 /**
@@ -377,7 +422,6 @@ l_cleanup:
     return return_code;
 }
 
-// Retrieve and 
 /**
  * Measure and calculate battery power level percentage.
  * 
@@ -386,7 +430,7 @@ l_cleanup:
  * @return RETURN_CODE__SUCCESS        Success.
  *         RETURN_CODE__UNINITIALIZED  An unexpected error occurred.
  */ 
-return_code_t pwr__get_battery_level(uint8_t pin, uint8_t * level)
+return_code_t power__get_battery_level(uint8_t pin, uint8_t * level)
 {
     return_code_t return_code = RETURN_CODE__UNINITIALIZED;
     float batteryVoltage = 0;
@@ -404,7 +448,7 @@ return_code_t pwr__get_battery_level(uint8_t pin, uint8_t * level)
     
     // Percentage is calculated by divison in the (maximum battery voltage - minimum battery voltage).
     // I.e., Vmax-Vmin, e.g., 6.6v - 5.25v -> 4.5v.
-    *level = (1 - (BAT_VMAX - batteryVoltage) / (BAT_VMAX - BAT_VMIN)) * PERCENT_MAX;
+    *level = (1 - (BATTERY_VOLTAGE_MAX - batteryVoltage) / (BATTERY_VOLTAGE_MAX - BATTERY_VOLTAGE_MIN)) * PERCENT_MAX;
     return_code = RETURN_CODE__SUCCESS;
 
 l_cleanup:
@@ -523,17 +567,44 @@ int power__get_bandgap()
     return results;
 }
 
-// 
 /**
  * Validate temperature sensor values. Realistically, they should be in a range of 0 to 50 degrees Celsius.
  * @param[in] value Measured temperature in Celsius.
- * @return `true` if the temperature value is in the 0 - 50 C range.
+ * @return RETURN_CODE__SUCCESS        Success.
+ *         RETURN_CODE__UNINITIALIZED  An unexpected error occurred.
+ *         RETURN_CODE__TEMP_TOO_LOW   Temperatured measured is lower than `TEMP_DIAGNOSTIC_TEMP_MIN`.
+ *         RETURN_CODE__TEMP_TOO_HIGH  Temperatured measured is lower than `TEMP_DIAGNOSTIC_TEMP_MAX`.
  */
-bool diagnostics__is_temperature_valid(uint8_t value)
+return_code_t diagnostics__assert_temperature_valid(uint8_t value)
 {
-    return (value >= 0) && (value <= 50);
+    return_code_t return_code = RETURN_CODE__UNINITIALIZED;
+
+    if (value < TEMP_DIAGNOSTIC_TEMP_MIN)
+    {
+        return_code = RETURN_CODE__TEMP_TOO_LOW;
+        goto l_cleanup;
+    }
+
+    if (value > TEMP_DIAGNOSTIC_TEMP_MAX)
+    {
+        return_code = RETURN_CODE__TEMP_TOO_HIGH;
+        goto l_cleanup;
+    }
+
+    return_code = RETURN_CODE__SUCCESS;
+
+l_cleanup:
+    return return_code;
 }
 
+/**
+ * Validate temperature sensor value range and stability.
+ * 
+ * @param[in] pin Pin to which the thermistor to be tested is connected.
+ * @return RETURN_CODE__SUCCESS        Success.
+ *         RETURN_CODE__UNINITIALIZED        An unexpected error occurred.
+ *         RETURN_CODE__UNSTABLE_VALUE_TEMP  The measured temperature exceeds `TEMP_DIAGNOSTIC_MAX_DIFFERENCE`.
+ */
 return_code_t diagnostics__validate_temp_sensor(uint8_t pin)
 {
     return_code_t return_code = RETURN_CODE__UNINITIALIZED;
@@ -543,21 +614,19 @@ return_code_t diagnostics__validate_temp_sensor(uint8_t pin)
     float temp = 0;
     
     return_code = temp__measure(AIN_TEMP_1, &temp);
-
+    if (RETURN_CODE__SUCCESS != return_code)
+    {
+        goto l_cleanup;
+    }
+    
+    // Check the stable value is in range.
+    return_code = diagnostics__assert_temperature_valid(temp);
     if (RETURN_CODE__SUCCESS != return_code)
     {
         goto l_cleanup;
     }
     
     // Check the sensor value is stable.
-
-    // Check the stable value is in range.
-    if (diagnostics__is_temperature_valid(temp))
-    {
-        lcd__write_error("TMP1-BOUNDS");
-    }
-
-    
     for (i = 0; i < TEMP_DIAGNOSTIC_CYCLE_COUNT; ++i)
     {
         return_code = temp__measure(pin, &temp);
@@ -574,18 +643,22 @@ return_code_t diagnostics__validate_temp_sensor(uint8_t pin)
         {
             temp_max = temp;
         }
-        delay(10);
+        delay(TEMP_DIAGNOSTIC_MEASUREMENT_INTERVAL);
     }
+
     if ((temp_max - temp_min) > TEMP_DIAGNOSTIC_MAX_DIFFERENCE)
     {
-        lcd__write_error("UNSTABLE TMP1");
+        return_code = RETURN_CODE__UNSTABLE_VALUE_TEMP;
+        goto l_cleanup;
     }
+
+    return_code = RETURN_CODE__SUCCESS;
 
 l_cleanup:
     return return_code;
 }
 
-void diagnostics__run()
+return_code_t diagnostics__run()
 {
     return_code_t return_code = RETURN_CODE__UNINITIALIZED;
     uint8_t battery_level = 0;
@@ -597,138 +670,66 @@ void diagnostics__run()
     delay(3000);
     g_lcd.home();
 
-    return_code = pwr__get_battery_level(AIN_BATTERY_VCC, &battery_level);
+    // Verify valid internal voltage.
+    // This must be done before validating battery level since
+    // battery level measurement depends on the internal voltage.
+    if (power__get_bandgap() > INTERNAL_VCC_MAX)
+    {
+        return_code = RETURN_CODE__VCC_TOO_HIGH;
+        goto l_cleanup;
+    }
+
+    if (power__get_bandgap() < INTERNAL_VCC_MIN)
+    {
+        return_code = RETURN_CODE__VCC_TOO_LOW;
+        goto l_cleanup;
+    }
+
+    // Verify valid battery level.
+    return_code = power__get_battery_level(AIN_BATTERY_VCC, &battery_level);
     if (RETURN_CODE__SUCCESS != return_code)
     {
         goto l_cleanup;
     }
 
-    // verify valid temps range.
-    
-
-    i = measureTemp(AIN_TEMP_2);
-    if (i < 0 || i > 40)
+    if (battery_level < BATTERY_VOLTAGE_MIN)
     {
-        lcd__write_error("TMP2-BOUNDS");
+        return_code = RETURN_CODE__BATTERY_TOO_LOW;
+        goto l_cleanup;
     }
 
-    i = measureTemp(AIN_TEMP_3);
-    if (i < 0 || i > 40)
+    if (battery_level > BATTERY_VOLTAGE_MAX)
     {
-        lcd__write_error("TMP3-BOUNDS");
+        return_code = RETURN_CODE__BATTERY_TOO_HIGH;
+        goto l_cleanup;
     }
 
-    i = measureTemp(AIN_TEMP_4);
-    if (i < 0 || i > 40)
+    // Verify valid and stable temperature range.
+    return_code = diagnostics__validate_temp_sensor(AIN_TEMP_1);
+    if (RETURN_CODE__SUCCESS != return_code)
     {
-        lcd__write_error("TMP4-BOUNDS");
+        goto l_cleanup;
     }
 
-    // voltage
-    if (power__get_bandgap() > 550)
+    return_code = diagnostics__validate_temp_sensor(AIN_TEMP_2);
+    if (RETURN_CODE__SUCCESS != return_code)
     {
-        lcd__write_error("VOLTAGE HIGH");
+        goto l_cleanup;
     }
 
-    if (power__get_bandgap() < 425)
+    return_code = diagnostics__validate_temp_sensor(AIN_TEMP_3);
+    if (RETURN_CODE__SUCCESS != return_code)
     {
-        lcd__write_error("VOLTAGE LOW");
+        goto l_cleanup;
     }
 
-    // sensor data stability
-    /*
-       Checks for stable sensor values. Unstable values often indicate a disconnected/malfunctioning sensor.
-    */
-
-    // temp1
-    int tMax = -999;
-    int tMin = 999;
-    for (int s = 0; s < 15; s++)
+    return_code = diagnostics__validate_temp_sensor(AIN_TEMP_4);
+    if (RETURN_CODE__SUCCESS != return_code)
     {
-        i = measureTemp(AIN_TEMP_1);
-        if (i > tMin)
-        {
-            tMin = i;
-        }
-        if (i < tMax)
-        {
-            tMax = i;
-        }
-        delay(10);
-    }
-    if (tMax - tMin > 7)
-    {
-        lcd__write_error("UNSTABLE TMP1");
+        goto l_cleanup;
     }
 
-    // temp2
-    tMax = -999;
-    tMin = 999;
-    for (int s = 0; s < 15; s++)
-    {
-        i = measureTemp(AIN_TEMP_2);
-        if (i > tMin)
-        {
-            tMin = i;
-        }
-        if (i < tMax)
-        {
-            tMax = i;
-        }
-        delay(10);
-    }
-    if (tMax - tMin > 7)
-    {
-        lcd__write_error("UNSTABLE TMP2");
-    }
-
-    // temp3
-    tMax = -999;
-    tMin = 999;
-    for (int s = 0; s < 15; s++)
-    {
-        i = measureTemp(AIN_TEMP_3);
-        if (i > tMin)
-        {
-            tMin = i;
-        }
-        if (i < tMax)
-        {
-            tMax = i;
-        }
-        delay(10);
-    }
-    if (tMax - tMin > 7)
-    {
-        lcd__write_error("UNSTABLE TMP3");
-    }
-
-    // temp4
-    tMax = -999;
-    tMin = 999;
-    for (int s = 0; s < 15; s++)
-    {
-        i = measureTemp(AIN_TEMP_4);
-        if (i > tMin)
-        {
-            tMin = i;
-        }
-        if (i < tMax)
-        {
-            tMax = i;
-        }
-        delay(10);
-    }
-    if (tMax - tMin > 7)
-    {
-        lcd__write_error("UNSTABLE TMP4");
-    }
-
-    // battery level
-    if (battPercent < 15)
-    {
-        lcd__write_error("BATTERY LOW");
-    }
+    return_code = RETURN_CODE__SUCCESS;
 
 l_cleanup:
     return return_code;
