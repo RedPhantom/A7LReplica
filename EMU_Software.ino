@@ -3,12 +3,13 @@
 // INCLUDES
 #include <Arduino.h>
 #include <Wire.h>
-#include <LiquidCrystal.h>
+#include <LCD.h>
 #include <LiquidCrystal_I2C.h>
 
 // MACROS
 
 // Push-to-talk
+// TODO: Validate the following line, it may be incorrect.
 // Pin D18, INPUT, supports interrupts.
 #define IN_BUTTON_PTT (3)
 
@@ -17,6 +18,8 @@
 #define OUT_SPEAKER (7)
 
 // Temperature
+// Temperature sensor count.
+#define TEMP_SENSOR_COUNT (4)
 // Pin A0.
 #define AIN_TEMP_1 (0)
 // Pin A1.
@@ -146,8 +149,8 @@ typedef enum
     // of a sensor are exceeded.
     RETURN_CODE__UNSTABLE_VALUE_TEMP,
 
-    // Unstable internal voltage.
-    RETURN_CODE__UNSTABLE_VALUE_VCC,
+    // Memory allocation operation has failed.
+    RETURN_CODE__ALLOCATION_FAILED,
 
 } return_code_t;
 
@@ -156,10 +159,8 @@ typedef enum
 typedef struct
 {
     // Array of values measured from sensors, Celsius.
-    uint8_t * values;
+    uint8_t values[TEMP_SENSOR_COUNT];
 
-    // Temperature sensor count.
-    size_t count;
 } temperatures_t;
 
 typedef struct
@@ -207,20 +208,22 @@ typedef struct
 
     // Level of the battery, percentage.
     uint8_t battery_level;
-} suite_state_s;
+} suite_state_t;
 
 // GLOBALS
 
 LiquidCrystal_I2C g_lcd(LCD_ADDR, 2, 1, 0, 4, 5, 6, 7);
+suite_state_t * g_suite_ptr = NULL;
 
-// play a Quindar tone when the PTT is changed.
+// FUNCTIONS
+
 /**
  * Check the PTT pin, playing a Quindar tone if needed.
  * 
  * @return RETURN_CODE__SUCCESS        Success.
  *         RETURN_CODE__UNINITIALIZED  An unexpected error occurred.
  */
-return_code_t ptt__check(suite_state_s * const suite_state)
+return_code_t ptt__check(suite_state_t * const suite_state)
 {   
     return_code_t return_code = RETURN_CODE__UNINITIALIZED;
     int is_on = digitalRead(IN_BUTTON_PTT);
@@ -246,7 +249,12 @@ l_cleanup:
     return return_code;
 }
 
-// Initialzie the LCD display.
+/**
+ * Initialize the LCD display.
+ * 
+ * @return RETURN_CODE__SUCCESS        Success.
+ *         RETURN_CODE__UNINITIALIZED  An unexpected error occurred.
+ */
 return_code_t lcd__init(void)
 {
     return_code_t return_code = RETURN_CODE__UNINITIALIZED;
@@ -259,13 +267,6 @@ return_code_t lcd__init(void)
     g_lcd.setBacklightPin(LCD_PIN_BACKLIGHT, POSITIVE);
     g_lcd.setBacklight(HIGH);
 
-    // Startup banner.
-    g_lcd.print("  NASA A7L SUIT ");
-    g_lcd.setCursor(0, 1);
-    g_lcd.print("< < START-UP > >");
-    g_lcd.clear();
-    delay(1000);
-
     // Add custom characters.
     g_lcd.createChar(LCD_SIGN_DEGREE_INDEX, degree);
     g_lcd.createChar(LCD_SIGN_PTT_OFF_INDEX, cpttOff);
@@ -277,8 +278,54 @@ l_cleanup:
     return return_code;
 }
 
+/**
+ * Initialize the suit.
+ * 
+ * @param[in,out] suite Pointer to an suite state struct.
+ * @return return_code_t 
+ */
+return_code_t core__init(suite_state_t ** suite)
+{
+    return_code_t return_code = RETURN_CODE__UNINITIALIZED;
+    suite_state_t * prepared_suite_state = NULL;
+
+    // Validate received pointer.
+    if (NULL == suite)
+    {
+        return_code = RETURN_CODE__NULL_POINTER;
+        goto l_cleanup;
+    }
+
+    // Allocate memory for the suite status.
+    prepared_suite_state = (suite_state_t *)malloc(sizeof(suite_state_t));
+    if (NULL == prepared_suite_state)
+    {
+        return_code = RETURN_CODE__ALLOCATION_FAILED;
+        goto l_cleanup;
+    }
+
+    *suite = prepared_suite_state
+    return_code = RETURN_CODE__SUCCESS;
+
+l_cleanup:
+    return return_code;
+}
+
 void setup()
 {
+    return_code_t return_code = RETURN_CODE__UNINITIALIZED;
+    suite_state_t * suite = NULL;
+
+    // Initialize serial connection.
+    // TODO
+
+    // Initialize suite state.
+    return_code = core__init(&suite);
+    if (RETURN_CODE__SUCCESS != return_code)
+    {
+        goto l_cleanup;
+    }
+
     // attach interrupt for ptt button change.
     // attachInterrupt(digitalPinToInterrupt(IN_BUTTON_PTT), pttChange, CHANGE );
     digitalWrite(IN_BUTTON_PTT, HIGH);
@@ -311,6 +358,9 @@ void setup()
 
     // to conclude:
     // performDiagnostics();
+l_cleanup:
+    
+    // TODO
 }
 
 void loop()
@@ -446,8 +496,8 @@ return_code_t power__get_battery_level(uint8_t pin, uint8_t * level)
     vccVoltage = power__get_bandgap();
     batteryVoltage = map(analogRead(AIN_BATTERY_VCC), UINT10_MIN, UINT10_MAX, 0, vccVoltage) / PERCENT_MAX;
     
-    // Percentage is calculated by divison in the (maximum battery voltage - minimum battery voltage).
-    // I.e., Vmax-Vmin, e.g., 6.6v - 5.25v -> 4.5v.
+    // Percentage is calculated by divison in the (maximum battery voltage - minimum battery voltage),
+    // i.e., Vmax-Vmin, e.g., 6.6v - 5.25v -> 4.5v.
     *level = (1 - (BATTERY_VOLTAGE_MAX - batteryVoltage) / (BATTERY_VOLTAGE_MAX - BATTERY_VOLTAGE_MIN)) * PERCENT_MAX;
     return_code = RETURN_CODE__SUCCESS;
 
@@ -491,20 +541,26 @@ l_cleanup:
  * @return RETURN_CODE__SUCCESS        Success.
  *         RETURN_CODE__UNINITIALIZED  An unexpected error occurred.
  */ 
-return_code_t lcd__update(suite_state_s state)
+return_code_t lcd__update(suite_state_t * state)
 {
     return_code_t return_code = RETURN_CODE__UNINITIALIZED;
     size_t i = 0;
     
+    if (NULL == state)
+    {
+        return_code = RETURN_CODE__NULL_POINTER;
+        goto l_cleanup;
+    }
+
     // Clear and home.
     g_lcd.clear();
     g_lcd.home();
 
     // Display temperatures.
     // Values are printed accross
-    for (i = 0; i < LCD_WIDTH; ++i)
+    for (i = 0; i < TEMP_SENSOR_COUNT; ++i)
     {
-        g_lcd.print(state.temperatures.values[i]);
+        g_lcd.print(state->temperatures.values[i]);
         g_lcd.write(LCD_SIGN_DEGREE_INDEX);
     }
 
@@ -525,11 +581,11 @@ return_code_t lcd__update(suite_state_s state)
     g_lcd.setCursor(0, LCD_HEIGHT - 1);
     
     g_lcd.print("PWR ");
-    g_lcd.print(state.battery_level);
+    g_lcd.print(state->battery_level);
     g_lcd.print("% ");
 
     g_lcd.print("FLOW ");
-    g_lcd.print(map(state.climate_control.flow_rate, 0, UINT10_MAX, PERCENT_MIN, PERCENT_MAX));
+    g_lcd.print(map(state->climate_control.flow_rate, 0, UINT10_MAX, PERCENT_MIN, PERCENT_MAX));
     g_lcd.print("%");
 
     return_code = RETURN_CODE__SUCCESS;
@@ -539,6 +595,11 @@ l_cleanup:
 }
 
 // Get the internal voltage.
+/**
+ * Measure the internal processor voltage, used for accurate external voltage measurement.
+ * 
+ * @return int Measured voltage in hundredths of volts (e.g., a return value of 100 is 1.00V)
+ */
 int power__get_bandgap()
 {
 #if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
@@ -569,13 +630,14 @@ int power__get_bandgap()
 
 /**
  * Validate temperature sensor values. Realistically, they should be in a range of 0 to 50 degrees Celsius.
+ * 
  * @param[in] value Measured temperature in Celsius.
  * @return RETURN_CODE__SUCCESS        Success.
  *         RETURN_CODE__UNINITIALIZED  An unexpected error occurred.
  *         RETURN_CODE__TEMP_TOO_LOW   Temperatured measured is lower than `TEMP_DIAGNOSTIC_TEMP_MIN`.
  *         RETURN_CODE__TEMP_TOO_HIGH  Temperatured measured is lower than `TEMP_DIAGNOSTIC_TEMP_MAX`.
  */
-return_code_t diagnostics__assert_temperature_valid(uint8_t value)
+return_code_t diagnostics__assert_temp_valid(uint8_t value)
 {
     return_code_t return_code = RETURN_CODE__UNINITIALIZED;
 
@@ -600,34 +662,37 @@ l_cleanup:
 /**
  * Validate temperature sensor value range and stability.
  * 
+ * @note Maximum function duration: TEMP_DIAGNOSTIC_MEASUREMENT_INTERVAL * TEMP_DIAGNOSTIC_CYCLE_COUNT.
  * @param[in] pin Pin to which the thermistor to be tested is connected.
- * @return RETURN_CODE__SUCCESS        Success.
+ * @return RETURN_CODE__SUCCESS              Success.
  *         RETURN_CODE__UNINITIALIZED        An unexpected error occurred.
- *         RETURN_CODE__UNSTABLE_VALUE_TEMP  The measured temperature exceeds `TEMP_DIAGNOSTIC_MAX_DIFFERENCE`.
+ *         RETURN_CODE__UNSTABLE_VALUE_TEMP  The measured temperature exceeds TEMP_DIAGNOSTIC_MAX_DIFFERENCE`.
+ *         RETURN_CODE__TEMP_TOO_LOW         The measured temperature is lower than the acceptable value.
+ *         RETURN_CODE__TEMP_TOO_HIGH        The measured temperature is higher than the acceptable value.
  */
-return_code_t diagnostics__validate_temp_sensor(uint8_t pin)
+return_code_t diagnostics__assert_temp_sensor_valid(uint8_t pin)
 {
     return_code_t return_code = RETURN_CODE__UNINITIALIZED;
-    uint8_t i = 0;
-    uint16_t temp_max = 0;
+    uint8_t cycle = 0;
+    uint16_t temp_max = 0;  // TODO: Replace with float's minimum value.
     uint16_t temp_min = UINT10_MAX;
     float temp = 0;
     
-    return_code = temp__measure(AIN_TEMP_1, &temp);
+    return_code = temp__measure(pin, &temp);
     if (RETURN_CODE__SUCCESS != return_code)
     {
         goto l_cleanup;
     }
     
     // Check the stable value is in range.
-    return_code = diagnostics__assert_temperature_valid(temp);
+    return_code = diagnostics__assert_temp_valid(temp);
     if (RETURN_CODE__SUCCESS != return_code)
     {
         goto l_cleanup;
     }
     
     // Check the sensor value is stable.
-    for (i = 0; i < TEMP_DIAGNOSTIC_CYCLE_COUNT; ++i)
+    for (cycle = 0; cycle < TEMP_DIAGNOSTIC_CYCLE_COUNT; ++cycle)
     {
         return_code = temp__measure(pin, &temp);
         if (RETURN_CODE__SUCCESS != return_code)
@@ -639,13 +704,17 @@ return_code_t diagnostics__validate_temp_sensor(uint8_t pin)
         {
             temp_min = temp;
         }
-        if (i < temp_max)
+
+        if (temp < temp_max)
         {
             temp_max = temp;
         }
+
+        // Wait for values to stabilize.
         delay(TEMP_DIAGNOSTIC_MEASUREMENT_INTERVAL);
     }
 
+    // Measure the maximum difference of all measurements.
     if ((temp_max - temp_min) > TEMP_DIAGNOSTIC_MAX_DIFFERENCE)
     {
         return_code = RETURN_CODE__UNSTABLE_VALUE_TEMP;
@@ -658,17 +727,19 @@ l_cleanup:
     return return_code;
 }
 
+/**
+ * Perform system-wide diagnostics.
+ * 
+ * @note Minimum function duration: TBD.
+ * @return return_code_t 
+ */
 return_code_t diagnostics__run()
 {
     return_code_t return_code = RETURN_CODE__UNINITIALIZED;
     uint8_t battery_level = 0;
 
-    g_lcd.setCursor(0, 0);
-    g_lcd.print("    Running");
-    g_lcd.setCursor(0, 1);
-    g_lcd.print("Diagnostics.....");
-    delay(3000);
-    g_lcd.home();
+    lcd__write_status("SELF TESTING...");
+    delay(1500);
 
     // Verify valid internal voltage.
     // This must be done before validating battery level since
@@ -685,13 +756,14 @@ return_code_t diagnostics__run()
         goto l_cleanup;
     }
 
-    // Verify valid battery level.
+    // Verify successful battery level measurement.
     return_code = power__get_battery_level(AIN_BATTERY_VCC, &battery_level);
     if (RETURN_CODE__SUCCESS != return_code)
     {
         goto l_cleanup;
     }
 
+    // Verify valid battery level.
     if (battery_level < BATTERY_VOLTAGE_MIN)
     {
         return_code = RETURN_CODE__BATTERY_TOO_LOW;
@@ -705,25 +777,25 @@ return_code_t diagnostics__run()
     }
 
     // Verify valid and stable temperature range.
-    return_code = diagnostics__validate_temp_sensor(AIN_TEMP_1);
+    return_code = diagnostics__assert_temp_sensor_valid(AIN_TEMP_1);
     if (RETURN_CODE__SUCCESS != return_code)
     {
         goto l_cleanup;
     }
 
-    return_code = diagnostics__validate_temp_sensor(AIN_TEMP_2);
+    return_code = diagnostics__assert_temp_sensor_valid(AIN_TEMP_2);
     if (RETURN_CODE__SUCCESS != return_code)
     {
         goto l_cleanup;
     }
 
-    return_code = diagnostics__validate_temp_sensor(AIN_TEMP_3);
+    return_code = diagnostics__assert_temp_sensor_valid(AIN_TEMP_3);
     if (RETURN_CODE__SUCCESS != return_code)
     {
         goto l_cleanup;
     }
 
-    return_code = diagnostics__validate_temp_sensor(AIN_TEMP_4);
+    return_code = diagnostics__assert_temp_sensor_valid(AIN_TEMP_4);
     if (RETURN_CODE__SUCCESS != return_code)
     {
         goto l_cleanup;
@@ -735,31 +807,27 @@ l_cleanup:
     return return_code;
 }
 
-// Progress - a number between 0 and 15, inclusive. Displays a progress bar on the LCD.
-void lcd__progress_bar(int p)
-{
-    for (int i = 0; i <= p; i++)
-    {
-        lcd.setCursor(i, 1);
-        lcd.print("#");
-    }
-}
-
-// writes the system status to the LCD and Serial.
+/**
+ * Output a status message to the LCD.
+ * 
+ * @param[in] s String to write to screen.
+ */
 void lcd__write_status(String s)
 {
-    lcd.setCursor(0, 0);
-    lcd.print(s);
-    Serial.println(s);
+    g_lcd.clear();
+    g_lcd.home();
+    g_lcd.print(s);
 }
 
+/**
+ * Output an error message to the LCD.
+ * @note Minimum function duration: 1000ms.
+ * 
+ * @param[in] s String to write to screen.
+ */
 void lcd__write_error(String s)
 {
-    Serial.println("ERR: " + s);
-    lcd.setCursor(0, 0);
-    lcd.print(s);
-    lcd.setCursor(0, 1);
-    lcd.print("                ");
+    lcd__write_status("ERR" + s);
     lcd.setBacklight(HIGH);
     delay(200);
     lcd.setBacklight(LOW);
@@ -769,5 +837,5 @@ void lcd__write_error(String s)
     lcd.setBacklight(LOW);
     delay(200);
     lcd.setBacklight(HIGH);
-    delay(2200);
+    delay(200);
 }
